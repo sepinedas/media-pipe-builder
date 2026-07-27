@@ -84,11 +84,14 @@ cd "${SRC}"
 
 # CPU-only build flags. MEDIAPIPE_DISABLE_GPU=1 avoids EGL/GLES dependencies,
 # which are neither present nor needed for headless inference on the Pi.
+#
+# Note: MediaPipe >= 0.10.3x builds globally with C++20 (its api3 node framework
+# uses `consteval` and class-type non-type template parameters). We deliberately
+# do NOT pass -std here so MediaPipe's own C++20 standard is honoured; forcing
+# c++17 breaks the api3 calculators.
 COMMON_FLAGS=(
     -c opt
     --define MEDIAPIPE_DISABLE_GPU=1
-    --cxxopt=-std=c++17
-    --host_cxxopt=-std=c++17
     --linkopt=-s
     --jobs=HOST_CPUS
     --local_ram_resources=HOST_RAM*0.6
