@@ -186,11 +186,15 @@ find mediapipe -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) \
     -print0 | while IFS= read -r -d '' f; do
     install -D "$f" "${INC}/${f}"
 done
-# Generated protobuf headers (from the real bazel-out dir; prune runfiles trees
-# so we never descend into their symlink cycles).
+# Generated headers (from the real bazel-out dir; prune runfiles trees so we
+# never descend into their symlink cycles). MediaPipe's public headers include
+# both generated protobuf headers (*.pb.h) and flatbuffers-generated schema
+# headers (*_generated.h, e.g. mediapipe/tasks/metadata/metadata_schema_generated.h),
+# neither of which exists in the source checkout.
 BIN_REAL="$(readlink -f bazel-bin)"
 find "${BIN_REAL}/mediapipe" -type d -name '*.runfiles' -prune -o \
-     -type f -name '*.pb.h' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+     -type f \( -name '*.pb.h' -o -name '*_generated.h' \) -print0 2>/dev/null |
+while IFS= read -r -d '' f; do
     rel="mediapipe/${f#"${BIN_REAL}"/mediapipe/}"
     install -D "$f" "${INC}/${rel}"
 done
