@@ -17,8 +17,10 @@ The payload itself:
   detector, image classifier/embedder, hand & pose landmarkers, face
   detector/landmarker, gesture recognizer, image segmenter) bundled into one
   shared object.
-- **`include/`** — MediaPipe headers plus generated protobuf headers, so you can
-  compile against the library.
+- **`include/`** — MediaPipe headers plus generated protobuf headers **and the
+  pinned third-party dependency headers** (Abseil, protobuf, Eigen, flatbuffers,
+  glog) that MediaPipe's public headers `#include`, so `include/` is
+  self-contained: a single `-Iinclude` is enough to compile against the library.
 - **`bin/`** — CPU example binaries (`object_detection_cpu`, `face_detection_cpu`,
   `hand_tracking_cpu`, `pose_tracking_cpu`) with their runfiles (models/data).
 - **`share/mediapipe/`** — TFLite models, graph `.pbtxt` configs, license and
@@ -67,21 +69,29 @@ object_detection_cpu \
   --calculator_graph_config_file=/opt/mediapipe/<ver>/share/mediapipe/graphs/object_detection_desktop_live.pbtxt
 ```
 
-Link the C++ library into your own program:
+Link the C++ library into your own program. MediaPipe's headers are compiled as
+**C++20** and the library is built CPU-only, so define `MEDIAPIPE_DISABLE_GPU`
+to match (otherwise the GPU code paths in headers like `image.h` are pulled in):
 
 ```bash
-g++ my_app.cc \
+g++ -std=c++20 -DMEDIAPIPE_DISABLE_GPU=1 my_app.cc \
   -I/opt/mediapipe/<ver>/include \
   -L/opt/mediapipe/<ver>/lib -lmediapipe_tasks \
+  $(pkg-config --cflags --libs opencv4) \
   -o my_app
 ```
 
-> Note: MediaPipe does not ship a stable standalone C++ SDK. The exported
-> headers cover MediaPipe itself; heavy transitive dependencies (Abseil,
-> protobuf, TensorFlow Lite) are statically linked into `libmediapipe_tasks.so`.
-> For non-trivial applications, building against MediaPipe with Bazel remains the
-> officially supported path — these artifacts are aimed at deploying the
-> prebuilt library and CPU tools onto the device.
+> Note: MediaPipe does not ship a stable standalone C++ SDK, and its public
+> headers `#include` heavy transitive dependencies (Abseil, protobuf, Eigen,
+> flatbuffers, glog). Those dependency **headers are bundled** into `include/`
+> at the exact versions the library was built against — do **not** substitute
+> your distro's copies (this build pins protobuf 5.28 and a 2023 Abseil, far
+> newer than Debian Bookworm's, so the ABIs would not match the symbols baked
+> into `libmediapipe_tasks.so`). Those dependencies' implementations are
+> statically linked into the shared library, so you only link `-lmediapipe_tasks`
+> (plus OpenCV). For non-trivial applications, building against MediaPipe with
+> Bazel remains the officially supported path — these artifacts are aimed at
+> deploying the prebuilt library and CPU tools onto the device.
 
 ## Repository layout
 
