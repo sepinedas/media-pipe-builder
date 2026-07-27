@@ -195,6 +195,103 @@ find "${BIN_REAL}/mediapipe" -type d -name '*.runfiles' -prune -o \
     install -D "$f" "${INC}/${rel}"
 done
 
+# --- Third-party dependency headers ---------------------------------------
+# MediaPipe's *public* C++ headers #include their pinned dependencies, so a
+# downstream program that includes a Tasks header pulls them in transitively:
+#   face_landmarker.h -> framework/formats/image.h        -> absl/...
+#                     -> framework/formats/matrix.h        -> Eigen/Core
+#                     -> framework/port/logging.h          -> glog/logging.h
+#                     -> ...generated *.pb.h               -> google/protobuf/...
+# These live in Bazel's external tree (some checked in, some generated into
+# bazel-bin), NOT under mediapipe/. Export them at the *exact* versions the
+# shared library was built against -- this MediaPipe pins protobuf 5.28 and a
+# 2023 Abseil, far newer than Debian Bookworm's, so downstream code cannot fall
+# back to system copies without API/ABI drift against the symbols baked into
+# libmediapipe_tasks.so. Bundling them makes include/ self-contained.
+echo "==> Exporting third-party dependency headers"
+EXT_SRC="${BAZEL_OUTPUT_BASE}/external"
+EXT_GEN="${BIN_REAL}/external"
+
+# Copy a dependency's header namespace <top> (e.g. "absl") into include/,
+# searching both the checked-in and generated external trees and merging them
+# (generated headers such as glog/logging.h overlay the source tree). $1 is a
+# probe header used to locate each include root; $2 is the top-level dir to copy.
+export_dep() {
+    local probe="$1" top="$2" base hit root found=0
+    for base in "${EXT_SRC}" "${EXT_GEN}"; do
+        [ -d "${base}" ] || continue
+        while IFS= read -r hit; do
+            [ -n "${hit}" ] || continue
+            root="${hit%/"${probe}"}"
+            [ -d "${root}/${top}" ] || continue
+            rsync -a --prune-empty-dirs \
+                --include='*/' \
+                --include='*.h' --include='*.hpp' --include='*.hh' \
+                --include='*.hxx' --include='*.inc' --include='*.ipp' \
+                --include='*.proto' --exclude='*' \
+                "${root}/${top}/" "${INC}/${top}/"
+            found=1
+        done < <(find "${base}" -maxdepth 8 -path "*/${probe}" 2>/dev/null || true)
+    done
+    if [ "${found}" = 1 ]; then echo "   + ${top}"; else
+        echo "   ! ${top} headers not found (probe ${probe})"; fi
+}
+
+export_dep "absl/base/config.h"        "absl"
+export_dep "google/protobuf/port.h"    "google"
+export_dep "flatbuffers/flatbuffers.h" "flatbuffers"
+export_dep "glog/logging.h"            "glog"
+export_dep "gflags/gflags.h"           "gflags"
+
+# Eigen headers are extensionless (Eigen/Core, Eigen/Dense), so copy the trees
+# wholesale rather than filtering by suffix.
+for base in "${EXT_SRC}" "${EXT_GEN}"; do
+    eh="$(find "${base}" -maxdepth 8 -path "*/Eigen/Core" -print -quit 2>/dev/null || true)"
+    if [ -n "${eh}" ]; then
+        er="${eh%/Eigen/Core}"
+        echo "   + Eigen"
+        rsync -a "${er}/Eigen" "${INC}/"
+        [ -d "${er}/unsupported" ] && rsync -a "${er}/unsupported" "${INC}/"
+        break
+    fi
+done
+
+# utf8_range (a protobuf 5.x dependency) ships flat headers included without a
+# namespace prefix; drop them at the include root if present.
+for base in "${EXT_SRC}" "${EXT_GEN}"; do
+    uh="$(find "${base}" -maxdepth 8 -name 'utf8_validity.h' -print -quit 2>/dev/null || true)"
+    if [ -n "${uh}" ]; then
+        echo "   + utf8_range"
+        find "$(dirname "${uh}")" -maxdepth 1 -name '*.h' -exec cp -n {} "${INC}/" \;
+        break
+    fi
+done
+
+# --- Verify the exported include tree is self-contained -------------------
+# Compile (syntax-only) a real Tasks program against ONLY the packaged headers
+# (plus OpenCV). If any transitive dependency header is missing from include/,
+# this fails the build here -- with the exact missing-header error -- instead of
+# shipping a .deb that cannot be compiled against on the device.
+echo "==> Verifying the exported headers compile a Face Landmarker program"
+CHECK_SRC="$(mktemp --suffix=.cc)"
+cat > "${CHECK_SRC}" <<'EOF'
+#include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker.h"
+#include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker_result.h"
+#include "mediapipe/framework/formats/image.h"
+#include "mediapipe/framework/formats/image_frame_opencv.h"
+int main() { return 0; }
+EOF
+if clang++ -std=c++20 -fsyntax-only -DMEDIAPIPE_DISABLE_GPU=1 \
+       -I"${INC}" $(pkg-config --cflags opencv4 2>/dev/null) "${CHECK_SRC}"; then
+    echo "   self-check passed: include/ is self-contained"
+else
+    echo "!! header self-check FAILED: the exported include/ tree is missing one" >&2
+    echo "!! or more transitive dependency headers (see the compiler errors above)." >&2
+    rm -f "${CHECK_SRC}"
+    exit 1
+fi
+rm -f "${CHECK_SRC}"
+
 # --- Docs -----------------------------------------------------------------
 cp LICENSE "${PREFIX}/share/mediapipe/LICENSE" 2>/dev/null || true
 cat > "${PREFIX}/share/mediapipe/BUILD_INFO.txt" <<EOF
