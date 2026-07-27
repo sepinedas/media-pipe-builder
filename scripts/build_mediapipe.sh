@@ -57,6 +57,7 @@ apt-get install -y --no-install-recommends \
     mesa-common-dev \
     file \
     patchelf \
+    perl \
     rsync
 update-ca-certificates || true
 
@@ -242,6 +243,54 @@ export_dep "google/protobuf/port.h"    "google"
 export_dep "flatbuffers/flatbuffers.h" "flatbuffers"
 export_dep "glog/logging.h"            "glog"
 export_dep "gflags/gflags.h"           "gflags"
+
+# glog 0.6.0 self-containment fix.
+# ---------------------------------
+# glog's *Bazel* build (unlike its CMake build) never generates glog/export.h
+# and compiles the `#include <glog/export.h>` out of its public headers
+# (@ac_cv_have_glog_export@ is hardcoded to 0). Instead it defines the
+# GLOG_EXPORT / GLOG_NO_EXPORT / GLOG_DEPRECATED macros through the glog
+# cc_library's `defines` attribute, i.e. as -D flags Bazel injects into every
+# glog consumer at compile time. A downstream program that compiles against the
+# packaged headers outside Bazel has neither the generated export.h nor those
+# -D flags, so glog/logging.h fails with "GLOG_EXPORT undefined". To keep
+# include/ self-contained we synthesise a real glog/export.h (matching glog's
+# non-Windows `defines`) and re-enable its include in the exported glog headers.
+if [ -d "${INC}/glog" ]; then
+    echo "   + glog/export.h (synthesised; Bazel omits it)"
+    cat > "${INC}/glog/export.h" <<'EOF'
+// Synthesised by the MediaPipe aarch64 packaging.
+//
+// glog 0.6.0's Bazel build does not generate this header; it defines the
+// GLOG_EXPORT family of macros via the cc_library `defines` (compiler -D flags)
+// instead. Downstream code compiling against the bundled headers has no such
+// flags, so we re-create the macros here (matching glog's non-Windows defines)
+// to keep the exported include/ tree self-contained.
+#ifndef GLOG_EXPORT_H
+#define GLOG_EXPORT_H
+
+#ifndef GLOG_EXPORT
+#  define GLOG_EXPORT __attribute__((visibility("default")))
+#endif
+
+#ifndef GLOG_NO_EXPORT
+#  define GLOG_NO_EXPORT __attribute__((visibility("hidden")))
+#endif
+
+#ifndef GLOG_DEPRECATED
+#  define GLOG_DEPRECATED __attribute__((deprecated))
+#endif
+
+#endif  // GLOG_EXPORT_H
+EOF
+    # Re-enable the `#include <glog/export.h>` that Bazel disabled via
+    # `#if 0 ... #endif`, so the exported glog headers pull in the macros above.
+    find "${INC}/glog" -type f -name '*.h' -print0 | while IFS= read -r -d '' gh; do
+        perl -0pi -e \
+          's{#if\s+0\s*\n#include\s*<glog/export\.h>\s*\n#endif}{#include <glog/export.h>}g' \
+          "${gh}"
+    done
+fi
 
 # Eigen headers are extensionless (Eigen/Core, Eigen/Dense), so copy the trees
 # wholesale rather than filtering by suffix.
