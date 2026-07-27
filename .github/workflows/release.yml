@@ -30,6 +30,19 @@ on:
   push:
     tags:
       - "mp-v*"
+    # Bootstrap trigger: lets the pipeline run from its development branch
+    # before it has been merged to the default branch (where workflow_dispatch
+    # and tag triggers become available). Builds MEDIAPIPE_VERSION_DEFAULT below.
+    branches:
+      - "claude/mediapipe-rpi-release-pipeline-c8gd7g"
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/**"
+      - "overlay/**"
+
+env:
+  # Version built when the pipeline runs from a branch push (bootstrap trigger).
+  MEDIAPIPE_VERSION_DEFAULT: "v0.10.35"
 
 permissions:
   contents: write
@@ -47,10 +60,15 @@ jobs:
         id: params
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
             # tag mp-v0.10.35 -> MediaPipe v0.10.35
             MP_VER="${GITHUB_REF_NAME#mp-}"
             REL_TAG="${GITHUB_REF_NAME}"
+            PUBLISH="true"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # Branch (bootstrap) push: build the default version.
+            MP_VER="${MEDIAPIPE_VERSION_DEFAULT}"
+            REL_TAG="mp-${MP_VER}"
             PUBLISH="true"
           else
             MP_VER="${{ github.event.inputs.mediapipe_version }}"
