@@ -30,6 +30,8 @@ echo "==> Installing build dependencies"
 apt-get update
 apt-get install -y --no-install-recommends \
     build-essential \
+    clang \
+    lld \
     ca-certificates \
     curl \
     git \
@@ -57,6 +59,12 @@ apt-get install -y --no-install-recommends \
     patchelf \
     rsync
 update-ca-certificates || true
+
+# MediaPipe's api3 framework (C++20 class-type NTTPs with deleted copy ctors) is
+# developed and tested against Clang; GCC rejects that pattern. Build with Clang.
+export CC=clang
+export CXX=clang++
+echo "==> Using compiler: $(clang --version | head -n1)"
 
 echo "==> Installing Bazelisk (drives the Bazel version pinned in .bazelversion)"
 BAZELISK_VERSION="v1.25.0"
@@ -92,6 +100,8 @@ cd "${SRC}"
 COMMON_FLAGS=(
     -c opt
     --define MEDIAPIPE_DISABLE_GPU=1
+    --repo_env=CC=clang
+    --repo_env=CXX=clang++
     --linkopt=-s
     --jobs=HOST_CPUS
     --local_ram_resources=HOST_RAM*0.6
