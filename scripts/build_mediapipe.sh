@@ -57,7 +57,6 @@ apt-get install -y --no-install-recommends \
     mesa-common-dev \
     file \
     patchelf \
-    perl \
     rsync
 update-ca-certificates || true
 
@@ -244,54 +243,6 @@ export_dep "flatbuffers/flatbuffers.h" "flatbuffers"
 export_dep "glog/logging.h"            "glog"
 export_dep "gflags/gflags.h"           "gflags"
 
-# glog 0.6.0 self-containment fix.
-# ---------------------------------
-# glog's *Bazel* build (unlike its CMake build) never generates glog/export.h
-# and leaves the `#include <glog/export.h>` compiled out of its public headers
-# (@ac_cv_have_glog_export@ is hardcoded to 0). Instead it defines the
-# GLOG_EXPORT / GLOG_NO_EXPORT / GLOG_DEPRECATED macros through the glog
-# cc_library's `defines` attribute, i.e. as -D flags Bazel injects into every
-# glog consumer at compile time. A downstream program that compiles against the
-# packaged headers outside Bazel has neither a generated export.h nor those -D
-# flags, so glog/logging.h fails with "GLOG_EXPORT undefined".
-#
-# To keep include/ self-contained we prepend guarded definitions of these macros
-# (matching glog's non-Windows `defines`) to the top of every exported glog
-# header, so GLOG_EXPORT is always defined before use -- independent of whatever
-# include wiring the generated headers do or don't have. A matching glog/export.h
-# is also written for any header that includes it directly.
-if [ -d "${INC}/glog" ]; then
-    echo "   + glog export macros (Bazel supplies these via -D, not glog/export.h)"
-    GLOG_MACROS="$(mktemp)"
-    cat > "${GLOG_MACROS}" <<'EOF'
-/* Injected by the MediaPipe aarch64 packaging. glog 0.6.0's Bazel build defines
-   these macros via compiler -D flags instead of glog/export.h, so code building
-   against the bundled headers outside Bazel would otherwise see GLOG_EXPORT
-   undefined. Definitions match glog's non-Windows cc_library `defines`. */
-#ifndef GLOG_EXPORT
-#define GLOG_EXPORT __attribute__((visibility("default")))
-#endif
-#ifndef GLOG_NO_EXPORT
-#define GLOG_NO_EXPORT __attribute__((visibility("hidden")))
-#endif
-#ifndef GLOG_DEPRECATED
-#define GLOG_DEPRECATED __attribute__((deprecated))
-#endif
-EOF
-    find "${INC}/glog" -type f -name '*.h' -print0 | while IFS= read -r -d '' gh; do
-        cat "${GLOG_MACROS}" "${gh}" > "${gh}.tmp" && mv "${gh}.tmp" "${gh}"
-    done
-    # Provide glog/export.h too (Bazel omits it), in case a header includes it.
-    cp "${GLOG_MACROS}" "${INC}/glog/export.h.body"
-    {
-        echo "#ifndef GLOG_EXPORT_H"
-        echo "#define GLOG_EXPORT_H"
-        cat "${INC}/glog/export.h.body"
-        echo "#endif  // GLOG_EXPORT_H"
-    } > "${INC}/glog/export.h"
-    rm -f "${INC}/glog/export.h.body" "${GLOG_MACROS}"
-fi
-
 # Eigen headers are extensionless (Eigen/Core, Eigen/Dense), so copy the trees
 # wholesale rather than filtering by suffix.
 for base in "${EXT_SRC}" "${EXT_GEN}"; do
@@ -315,6 +266,67 @@ for base in "${EXT_SRC}" "${EXT_GEN}"; do
         break
     fi
 done
+
+# --- Materialise symlinked headers into real files ------------------------
+# The dependency headers above were rsync'd out of Bazel's external tree, whose
+# _virtual_includes layout is a forest of symlinks pointing back into the build
+# tree. Copied with `rsync -a`, those headers land in include/ as symlinks:
+#   * they would dangle the moment the tarball/.deb is extracted on the target
+#     device (the build tree they point at doesn't exist there), and
+#   * `find -type f` (used below to patch glog) silently skips them.
+# Replace every symlink under include/ with a copy of its referent so the
+# packaged tree is genuine, self-contained files.
+echo "==> Materialising symlinked headers into real files"
+find "${INC}" -type l | while IFS= read -r link; do
+    tgt="$(readlink -f "${link}" 2>/dev/null || true)"
+    if [ -n "${tgt}" ] && [ -f "${tgt}" ]; then
+        cp -f --remove-destination "${tgt}" "${link}"
+    fi
+done
+
+# --- glog 0.6.0 self-containment fix (export macros) ----------------------
+# glog's *Bazel* build (unlike its CMake build) never generates glog/export.h
+# and leaves the `#include <glog/export.h>` compiled out of its public headers
+# (@ac_cv_have_glog_export@ is hardcoded to 0). Instead it defines the
+# GLOG_EXPORT / GLOG_NO_EXPORT / GLOG_DEPRECATED macros through the glog
+# cc_library's `defines` attribute, i.e. as -D flags Bazel injects into every
+# glog consumer at compile time. A downstream program that compiles against the
+# packaged headers outside Bazel has neither a generated export.h nor those -D
+# flags, so glog/logging.h fails with "GLOG_EXPORT undefined". Prepend guarded
+# definitions of these macros (matching glog's non-Windows `defines`) to the top
+# of every exported glog header so GLOG_EXPORT is always defined before use,
+# independent of the generated headers' include wiring. A matching glog/export.h
+# is written too, for any header that includes it directly.
+if [ -d "${INC}/glog" ]; then
+    echo "   + glog export macros (Bazel supplies these via -D, not glog/export.h)"
+    GLOG_MACROS="$(mktemp)"
+    cat > "${GLOG_MACROS}" <<'EOF'
+/* Injected by the MediaPipe aarch64 packaging. glog 0.6.0's Bazel build defines
+   these macros via compiler -D flags instead of glog/export.h, so code building
+   against the bundled headers outside Bazel would otherwise see GLOG_EXPORT
+   undefined. Definitions match glog's non-Windows cc_library `defines`. */
+#ifndef GLOG_EXPORT
+#define GLOG_EXPORT __attribute__((visibility("default")))
+#endif
+#ifndef GLOG_NO_EXPORT
+#define GLOG_NO_EXPORT __attribute__((visibility("hidden")))
+#endif
+#ifndef GLOG_DEPRECATED
+#define GLOG_DEPRECATED __attribute__((deprecated))
+#endif
+EOF
+    find -L "${INC}/glog" -type f -name '*.h' -print0 | while IFS= read -r -d '' gh; do
+        cat "${GLOG_MACROS}" "${gh}" > "${gh}.tmp" && mv "${gh}.tmp" "${gh}"
+    done
+    # Provide glog/export.h too (Bazel omits it), in case a header includes it.
+    {
+        echo "#ifndef GLOG_EXPORT_H"
+        echo "#define GLOG_EXPORT_H"
+        cat "${GLOG_MACROS}"
+        echo "#endif  // GLOG_EXPORT_H"
+    } > "${INC}/glog/export.h"
+    rm -f "${GLOG_MACROS}"
+fi
 
 # --- Verify the exported include tree is self-contained -------------------
 # Compile (syntax-only) a real Tasks program against ONLY the packaged headers
