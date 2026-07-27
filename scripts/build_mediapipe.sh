@@ -247,49 +247,49 @@ export_dep "gflags/gflags.h"           "gflags"
 # glog 0.6.0 self-containment fix.
 # ---------------------------------
 # glog's *Bazel* build (unlike its CMake build) never generates glog/export.h
-# and compiles the `#include <glog/export.h>` out of its public headers
+# and leaves the `#include <glog/export.h>` compiled out of its public headers
 # (@ac_cv_have_glog_export@ is hardcoded to 0). Instead it defines the
 # GLOG_EXPORT / GLOG_NO_EXPORT / GLOG_DEPRECATED macros through the glog
 # cc_library's `defines` attribute, i.e. as -D flags Bazel injects into every
 # glog consumer at compile time. A downstream program that compiles against the
-# packaged headers outside Bazel has neither the generated export.h nor those
-# -D flags, so glog/logging.h fails with "GLOG_EXPORT undefined". To keep
-# include/ self-contained we synthesise a real glog/export.h (matching glog's
-# non-Windows `defines`) and re-enable its include in the exported glog headers.
+# packaged headers outside Bazel has neither a generated export.h nor those -D
+# flags, so glog/logging.h fails with "GLOG_EXPORT undefined".
+#
+# To keep include/ self-contained we prepend guarded definitions of these macros
+# (matching glog's non-Windows `defines`) to the top of every exported glog
+# header, so GLOG_EXPORT is always defined before use -- independent of whatever
+# include wiring the generated headers do or don't have. A matching glog/export.h
+# is also written for any header that includes it directly.
 if [ -d "${INC}/glog" ]; then
-    echo "   + glog/export.h (synthesised; Bazel omits it)"
-    cat > "${INC}/glog/export.h" <<'EOF'
-// Synthesised by the MediaPipe aarch64 packaging.
-//
-// glog 0.6.0's Bazel build does not generate this header; it defines the
-// GLOG_EXPORT family of macros via the cc_library `defines` (compiler -D flags)
-// instead. Downstream code compiling against the bundled headers has no such
-// flags, so we re-create the macros here (matching glog's non-Windows defines)
-// to keep the exported include/ tree self-contained.
-#ifndef GLOG_EXPORT_H
-#define GLOG_EXPORT_H
-
+    echo "   + glog export macros (Bazel supplies these via -D, not glog/export.h)"
+    GLOG_MACROS="$(mktemp)"
+    cat > "${GLOG_MACROS}" <<'EOF'
+/* Injected by the MediaPipe aarch64 packaging. glog 0.6.0's Bazel build defines
+   these macros via compiler -D flags instead of glog/export.h, so code building
+   against the bundled headers outside Bazel would otherwise see GLOG_EXPORT
+   undefined. Definitions match glog's non-Windows cc_library `defines`. */
 #ifndef GLOG_EXPORT
-#  define GLOG_EXPORT __attribute__((visibility("default")))
+#define GLOG_EXPORT __attribute__((visibility("default")))
 #endif
-
 #ifndef GLOG_NO_EXPORT
-#  define GLOG_NO_EXPORT __attribute__((visibility("hidden")))
+#define GLOG_NO_EXPORT __attribute__((visibility("hidden")))
 #endif
-
 #ifndef GLOG_DEPRECATED
-#  define GLOG_DEPRECATED __attribute__((deprecated))
+#define GLOG_DEPRECATED __attribute__((deprecated))
 #endif
-
-#endif  // GLOG_EXPORT_H
 EOF
-    # Re-enable the `#include <glog/export.h>` that Bazel disabled via
-    # `#if 0 ... #endif`, so the exported glog headers pull in the macros above.
     find "${INC}/glog" -type f -name '*.h' -print0 | while IFS= read -r -d '' gh; do
-        perl -0pi -e \
-          's{#if\s+0\s*\n#include\s*<glog/export\.h>\s*\n#endif}{#include <glog/export.h>}g' \
-          "${gh}"
+        cat "${GLOG_MACROS}" "${gh}" > "${gh}.tmp" && mv "${gh}.tmp" "${gh}"
     done
+    # Provide glog/export.h too (Bazel omits it), in case a header includes it.
+    cp "${GLOG_MACROS}" "${INC}/glog/export.h.body"
+    {
+        echo "#ifndef GLOG_EXPORT_H"
+        echo "#define GLOG_EXPORT_H"
+        cat "${INC}/glog/export.h.body"
+        echo "#endif  // GLOG_EXPORT_H"
+    } > "${INC}/glog/export.h"
+    rm -f "${INC}/glog/export.h.body" "${GLOG_MACROS}"
 fi
 
 # Eigen headers are extensionless (Eigen/Core, Eigen/Dense), so copy the trees
