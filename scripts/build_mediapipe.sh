@@ -224,6 +224,9 @@ export_dep() {
             [ -n "${hit}" ] || continue
             root="${hit%/"${probe}"}"
             [ -d "${root}/${top}" ] || continue
+            # rsync only creates the final dest component; pre-create parents so
+            # a nested namespace (e.g. tensorflow/lite) doesn't fail on mkdir.
+            mkdir -p "${INC}/${top}"
             rsync -a --prune-empty-dirs \
                 --include='*/' \
                 --include='*.h' --include='*.hpp' --include='*.hh' \
