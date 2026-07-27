@@ -242,6 +242,12 @@ export_dep "google/protobuf/port.h"    "google"
 export_dep "flatbuffers/flatbuffers.h" "flatbuffers"
 export_dep "glog/logging.h"            "glog"
 export_dep "gflags/gflags.h"           "gflags"
+# MediaPipe's Tasks headers pull in TensorFlow Lite: base_options.h ->
+# mediapipe_builtin_op_resolver.h -> tensorflow/lite/kernels/register.h. Export
+# the tensorflow/lite header subtree (TFLite is self-contained from
+# tensorflow/core; its transitive header closure stays within tensorflow/lite +
+# flatbuffers, already bundled above).
+export_dep "tensorflow/lite/kernels/register.h" "tensorflow/lite"
 
 # Eigen headers are extensionless (Eigen/Core, Eigen/Dense), so copy the trees
 # wholesale rather than filtering by suffix.
