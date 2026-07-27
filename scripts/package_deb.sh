@@ -98,6 +98,6 @@ echo "Created ${DEB}"
 
 echo "==> Package metadata"
 dpkg-deb --info "${DEB}"
-dpkg-deb --contents "${DEB}" | head -n 40
+dpkg-deb --contents "${DEB}" | head -n 40 || true
 
 ls -lh "${OUT}"

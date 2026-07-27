@@ -132,16 +132,14 @@ mkdir -p "${PREFIX}/lib" "${PREFIX}/bin" "${PREFIX}/include" \
 cp -L "bazel-bin/libmp/libmediapipe_tasks.so" "${PREFIX}/lib/libmediapipe_tasks.so"
 patchelf --set-soname libmediapipe_tasks.so "${PREFIX}/lib/libmediapipe_tasks.so" || true
 
-# --- Example binaries + their runfiles (data/models) ----------------------
+# --- Example binaries -----------------------------------------------------
+# NOTE: we intentionally do NOT copy the Bazel *.runfiles trees. They contain
+# self-referential symlinks (<bin>.runfiles/<bin>.runfiles -> .) that turn a
+# dereferencing copy into an unbounded recursion. Instead we ship the binaries
+# plus a structured model/graph tree below.
 copy_example() {
     local label_dir="$1" name="$2"
-    local bin="bazel-bin/mediapipe/examples/desktop/${label_dir}/${name}"
-    cp -L "${bin}" "${PREFIX}/bin/${name}"
-    if [ -d "${bin}.runfiles" ]; then
-        # Dereference symlinks so the runfiles tree is self-contained.
-        cp -RL "${bin}.runfiles" "${PREFIX}/bin/${name}.runfiles" 2>/dev/null || \
-            cp -R "${bin}.runfiles" "${PREFIX}/bin/${name}.runfiles"
-    fi
+    cp -L "bazel-bin/mediapipe/examples/desktop/${label_dir}/${name}" "${PREFIX}/bin/${name}"
 }
 copy_example object_detection object_detection_cpu
 copy_example face_detection   face_detection_cpu
@@ -157,9 +155,28 @@ for g in \
     [ -f "$g" ] && cp "$g" "${PREFIX}/share/mediapipe/graphs/" || true
 done
 
-# --- Models (.tflite) shipped in-tree or fetched into runfiles ------------
-find mediapipe/models -name '*.tflite' -exec cp {} "${PREFIX}/share/mediapipe/models/" \; 2>/dev/null || true
-find -L bazel-bin -name '*.tflite' -exec cp -n {} "${PREFIX}/share/mediapipe/models/" \; 2>/dev/null || true
+# --- Models / assets ------------------------------------------------------
+# Structured tree from the MediaPipe source (preserves the mediapipe/... paths
+# that graphs reference at runtime). Run examples with this as the CWD.
+DATA="${PREFIX}/share/mediapipe/data"
+( cd "${SRC}"
+  find mediapipe/modules mediapipe/models -type f \
+       \( -name '*.tflite' -o -name '*.binarypb' -o -name '*.txt' \) -print0 2>/dev/null |
+  while IFS= read -r -d '' f; do
+      install -D "$f" "${DATA}/${f}"
+  done )
+# Models fetched by Bazel (e.g. ssdlite_object_detection) live under external/.
+# Use a plain (non-symlink-following) find on the real external dir to avoid
+# the runfiles symlink cycles. Place them flat in models/ (convenience) and in
+# data/mediapipe/models/ (the path the desktop graphs expect at runtime).
+if [ -d "${BAZEL_OUTPUT_BASE}/external" ]; then
+    mkdir -p "${DATA}/mediapipe/models"
+    find "${BAZEL_OUTPUT_BASE}/external" -type f -name '*.tflite' -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        cp -n "$f" "${PREFIX}/share/mediapipe/models/" 2>/dev/null || true
+        cp -n "$f" "${DATA}/mediapipe/models/" 2>/dev/null || true
+    done
+fi
 
 # --- Headers: MediaPipe sources + generated protobuf headers --------------
 echo "==> Exporting headers"
@@ -169,9 +186,12 @@ find mediapipe -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) \
     -print0 | while IFS= read -r -d '' f; do
     install -D "$f" "${INC}/${f}"
 done
-# Generated protobuf headers.
-find -L bazel-bin/mediapipe -type f -name '*.pb.h' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-    rel="${f#bazel-bin/}"
+# Generated protobuf headers (from the real bazel-out dir; prune runfiles trees
+# so we never descend into their symlink cycles).
+BIN_REAL="$(readlink -f bazel-bin)"
+find "${BIN_REAL}/mediapipe" -type d -name '*.runfiles' -prune -o \
+     -type f -name '*.pb.h' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+    rel="mediapipe/${f#"${BIN_REAL}"/mediapipe/}"
     install -D "$f" "${INC}/${rel}"
 done
 
