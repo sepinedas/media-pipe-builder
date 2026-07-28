@@ -84,9 +84,12 @@ git clone --depth 1 --branch "${MEDIAPIPE_VERSION}" \
 echo "==> Applying aarch64 overlays"
 # Enable the aarch64 OpenCV header/include layout.
 cp "${WORKSPACE_DIR}/overlay/opencv_linux.BUILD" "${SRC}/third_party/opencv_linux.BUILD"
-# Inject the shared-library target that bundles the Tasks Vision C++ API.
+# Inject the shared-library target that bundles the Tasks Vision C++ API, plus
+# the force-export source it compiles in (keeps the public factory symbols in
+# the .so so downstream code can link them).
 mkdir -p "${SRC}/libmp"
 cp "${WORKSPACE_DIR}/overlay/libmp.BUILD" "${SRC}/libmp/BUILD"
+cp "${WORKSPACE_DIR}/overlay/force_export.cc" "${SRC}/libmp/force_export.cc"
 
 cd "${SRC}"
 
@@ -267,30 +270,55 @@ for base in "${EXT_SRC}" "${EXT_GEN}"; do
     fi
 done
 
-# --- Verify the exported include tree is self-contained -------------------
-# Compile (syntax-only) a real Tasks program against ONLY the packaged headers
-# (plus OpenCV). If any transitive dependency header is missing from include/,
-# this fails the build here -- with the exact missing-header error -- instead of
-# shipping a .deb that cannot be compiled against on the device.
-echo "==> Verifying the exported headers compile a Face Landmarker program"
+# --- Verify the package compiles AND links a real Tasks program -----------
+# Build a program that actually calls FaceLandmarker::Create/DetectForVideo and
+# link it against ONLY the packaged include/ + lib/ (plus OpenCV). This catches
+# two whole classes of packaging bug before a .deb ships:
+#   * a missing transitive dependency *header* (compile error), and
+#   * a public API symbol that libmediapipe_tasks.so failed to export (link
+#     error: "undefined reference to FaceLandmarker::Create").
+echo "==> Verifying the package compiles and links a Face Landmarker program"
 CHECK_SRC="$(mktemp --suffix=.cc)"
 cat > "${CHECK_SRC}" <<'EOF'
+#include <memory>
+#include <opencv2/core.hpp>
+#include "mediapipe/framework/formats/image.h"
+#include "mediapipe/framework/formats/image_frame.h"
+#include "mediapipe/framework/formats/image_frame_opencv.h"
+#include "mediapipe/tasks/cc/vision/core/running_mode.h"
 #include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker.h"
 #include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker_result.h"
-#include "mediapipe/framework/formats/image.h"
-#include "mediapipe/framework/formats/image_frame_opencv.h"
-int main() { return 0; }
+using ::mediapipe::tasks::vision::face_landmarker::FaceLandmarker;
+using ::mediapipe::tasks::vision::face_landmarker::FaceLandmarkerOptions;
+// Reference the public entry points so the linker must resolve them from the
+// shared library (never actually run -- this is a link check only).
+int main() {
+    auto options = std::make_unique<FaceLandmarkerOptions>();
+    options->running_mode = ::mediapipe::tasks::vision::core::RunningMode::VIDEO;
+    auto lm = FaceLandmarker::Create(std::move(options));
+    if (!lm.ok()) return 1;
+    mediapipe::Image img;
+    auto r = (*lm)->DetectForVideo(img, 0);
+    return r.ok() ? 0 : 2;
+}
 EOF
-if clang++ -std=c++20 -fsyntax-only -DMEDIAPIPE_DISABLE_GPU=1 \
-       -I"${INC}" $(pkg-config --cflags opencv4 2>/dev/null) "${CHECK_SRC}"; then
-    echo "   self-check passed: include/ is self-contained"
+if clang++ -std=c++20 -DMEDIAPIPE_DISABLE_GPU=1 \
+       -I"${INC}" $(pkg-config --cflags opencv4 2>/dev/null) "${CHECK_SRC}" \
+       -L"${PREFIX}/lib" -lmediapipe_tasks \
+       -Wl,-rpath-link,"${PREFIX}/lib" \
+       $(pkg-config --libs opencv4 2>/dev/null) \
+       -o /tmp/mp_link_check 2>/tmp/mp_check.log; then
+    echo "   self-check passed: headers compile and the API links against the .so"
 else
-    echo "!! header self-check FAILED: the exported include/ tree is missing one" >&2
-    echo "!! or more transitive dependency headers (see the compiler errors above)." >&2
+    echo "!! self-check FAILED: the package could not compile+link a Face" >&2
+    echo "!! Landmarker program. See the errors below (missing header => include/" >&2
+    echo "!! is incomplete; undefined reference => the .so did not export the" >&2
+    echo "!! symbol, check overlay/force_export.cc)." >&2
+    cat /tmp/mp_check.log >&2 || true
     rm -f "${CHECK_SRC}"
     exit 1
 fi
-rm -f "${CHECK_SRC}"
+rm -f "${CHECK_SRC}" /tmp/mp_link_check
 
 # --- Docs -----------------------------------------------------------------
 cp LICENSE "${PREFIX}/share/mediapipe/LICENSE" 2>/dev/null || true

@@ -12,9 +12,15 @@ package(default_visibility = ["//visibility:public"])
 
 cc_binary(
     name = "libmediapipe_tasks.so",
+    # force_export.cc references the public factory entry points so the linker
+    # keeps them in the shared object (see the file for the full rationale);
+    # without it the Tasks API classes are dropped and downstream links fail with
+    # "undefined reference to FaceLandmarker::Create".
+    srcs = ["force_export.cc"],
     linkshared = True,
     linkstatic = True,
     deps = [
+        "//mediapipe/tasks/cc/core:mediapipe_builtin_op_resolver",
         "//mediapipe/tasks/cc/vision/face_detector",
         "//mediapipe/tasks/cc/vision/face_landmarker",
         "//mediapipe/tasks/cc/vision/gesture_recognizer",
