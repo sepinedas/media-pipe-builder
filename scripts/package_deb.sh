@@ -43,8 +43,8 @@ Priority: optional
 Architecture: arm64
 Maintainer: media-pipe-builder <noreply@users.noreply.github.com>
 Installed-Size: ${INSTALLED_KB}
-Depends: libc6 (>= 2.36), libstdc++6, libgcc-s1
-Recommends: libopencv-dev, ffmpeg
+Depends: libc6 (>= 2.36), libstdc++6, libgcc-s1, libopencv-dev, ffmpeg
+Recommends: libgl1
 Homepage: https://github.com/google-ai-edge/mediapipe
 Description: MediaPipe ${VER} C++ libraries and CPU tools for Raspberry Pi (aarch64)
  Prebuilt MediaPipe ${VER} for 64-bit Raspberry Pi OS (Bookworm / aarch64).
