@@ -35,7 +35,6 @@ on:
     # and tag triggers become available). Builds MEDIAPIPE_VERSION_DEFAULT below.
     branches:
       - "claude/mediapipe-rpi-release-pipeline-c8gd7g"
-      - "claude/failing-pipeline-ndcyxn"
     paths:
       - ".github/workflows/release.yml"
       - "scripts/**"
