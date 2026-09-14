@@ -189,7 +189,13 @@ echo "==> Resolving runtime package dependencies"
     readelf -d "${PREFIX}/lib/libmediapipe_tasks.so" |
         sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' |
         while IFS= read -r so; do
-            pkg="$(dpkg -S "${so}" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+            # A SONAME can be shipped by several packages -- notably the -dev
+            # package, which carries the unversioned .so symlink beside the
+            # runtime object and can win the match. Prefer a runtime package:
+            # a shared library must never make its users install build headers
+            # (an unfiltered match put libc6-dev in the Depends line).
+            pkg="$(dpkg -S "${so}" 2>/dev/null | cut -d: -f1 |
+                   grep -v -- '-dev$' | head -n1 || true)"
             # libc6 is re-emitted below with a minimum-version constraint.
             if [ -n "${pkg}" ] && [ "${pkg}" != "libc6" ]; then echo "${pkg}"; fi
         done | sort -u
