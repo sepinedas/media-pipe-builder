@@ -119,11 +119,28 @@ cd "${SRC}"
 # This makes the artifacts Pi 5 only: they will SIGILL on a Pi 4, Pi 3 or
 # Zero 2 W (Cortex-A72/A53). That is deliberate -- see the README.
 TARGET_MCPU="${TARGET_MCPU:-cortex-a76}"
+
+# MediaPipe pulls in TensorFlow, whose hermetic-Python setup picks the *system*
+# interpreter unless told otherwise and then wants a matching
+# requirements_lock.txt. It only ships locks for 3.9 - 3.12, so on Debian
+# trixie (Python 3.13) the build dies before compiling anything with:
+#
+#   Could not find requirements_lock.txt file matching specified Python version.
+#   Specified python version: 3.13
+#
+# Pin it explicitly. 3.11 is chosen because that is what bookworm's system
+# Python was, i.e. exactly what every previously-successful build of this
+# pipeline resolved to -- so moving the container to trixie does not quietly
+# change the Python toolchain at the same time. The interpreter is hermetic
+# (Bazel fetches it), so this is independent of what the container has.
+HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-3.11}"
+
 COMMON_FLAGS=(
     -c opt
     --define MEDIAPIPE_DISABLE_GPU=1
     --repo_env=CC=clang
     --repo_env=CXX=clang++
+    --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION}"
     --copt=-mcpu="${TARGET_MCPU}"
     --copt=-O3
     --linkopt=-s

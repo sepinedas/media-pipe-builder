@@ -59,6 +59,14 @@ The payload itself:
   for a different core, or set it to `generic` for a portable build.
 - MediaPipe is built with **Bazel** (via Bazelisk, honouring the pinned
   `.bazelversion`) using CPU/TFLite backends with `MEDIAPIPE_DISABLE_GPU=1`.
+- The Python toolchain is pinned to **3.11** via
+  `HERMETIC_PYTHON_VERSION`. MediaPipe pulls in TensorFlow, whose hermetic
+  Python setup otherwise adopts the container's system interpreter and then
+  demands a matching `requirements_lock.txt`; TensorFlow only ships locks for
+  3.9–3.12, so on trixie (Python 3.13) the build fails before compiling
+  anything. 3.11 is what bookworm's system Python was, so every previously
+  green build resolved to it — pinning keeps the container move from silently
+  changing the Python toolchain too. Override with `HERMETIC_PYTHON_VERSION`.
 - The stock `third_party/opencv_linux.BUILD` is replaced (see
   [`overlay/opencv_linux.BUILD`](overlay/opencv_linux.BUILD)) to use the aarch64
   Debian multiarch OpenCV layout, and a small
