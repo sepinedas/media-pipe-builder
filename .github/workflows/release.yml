@@ -2,12 +2,12 @@ name: Build & Release MediaPipe (Raspberry Pi aarch64)
 
 # Builds MediaPipe C++ artifacts for 64-bit Raspberry Pi OS and publishes them
 # as a GitHub Release:
-#   * mediapipe-<ver>-aarch64-rpi.tar.gz  - C++ shared library, headers, models,
+#   * mediapipe-<ver>-aarch64-rpi5.tar.gz - C++ shared library, headers, models,
 #     graph configs and CPU example binaries.
-#   * libmediapipe_<ver>-1_arm64.deb      - installer for a Raspberry Pi Zero 2 W.
+#   * libmediapipe_<ver>-1_arm64.deb      - installer for a Raspberry Pi 5.
 #
-# Built natively on GitHub's free arm64 runners, inside a Debian Bookworm
-# container so binaries match 64-bit Raspberry Pi OS (glibc 2.36).
+# Built natively on GitHub's free arm64 runners, inside a Debian container
+# whose release matches the target Raspberry Pi OS (see DEBIAN_SUITE_DEFAULT).
 
 on:
   # Manual builds: pick any MediaPipe tag.
@@ -26,6 +26,13 @@ on:
         type: boolean
         required: false
         default: true
+      debian_suite:
+        description: >-
+          Debian release to build inside. MUST match the target Pi's OS: the
+          library links that suite's OpenCV by soname, and a mismatch fails to
+          load. Raspberry Pi OS for the Pi 5 is trixie.
+        required: false
+        default: "trixie"
   # Tag-driven builds: push a tag like mp-v0.10.35 to build that version.
   push:
     tags:
@@ -43,6 +50,12 @@ on:
 env:
   # Version built when the pipeline runs from a branch push (bootstrap trigger).
   MEDIAPIPE_VERSION_DEFAULT: "v0.10.35"
+  # Debian release the build container runs, and therefore the OpenCV the
+  # shared library links by soname. This MUST match the target Pi's OS --
+  # Raspberry Pi OS for the Pi 5 is Debian 13 (trixie), whose OpenCV is 4.10
+  # (libopencv_core.so.410). Building on bookworm (OpenCV 4.6, .so.406)
+  # produces a library that cannot load there at all.
+  DEBIAN_SUITE_DEFAULT: "trixie"
 
 permissions:
   contents: write
@@ -76,10 +89,13 @@ jobs:
             [ -n "$REL_TAG" ] || REL_TAG="mp-${MP_VER}"
             PUBLISH="${{ github.event.inputs.publish_release }}"
           fi
+          SUITE="${{ github.event.inputs.debian_suite }}"
+          [ -n "$SUITE" ] || SUITE="${DEBIAN_SUITE_DEFAULT}"
           echo "mediapipe_version=${MP_VER}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${REL_TAG}" >> "$GITHUB_OUTPUT"
           echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
-          echo "Building MediaPipe ${MP_VER} -> release ${REL_TAG} (publish=${PUBLISH})"
+          echo "debian_suite=${SUITE}" >> "$GITHUB_OUTPUT"
+          echo "Building MediaPipe ${MP_VER} on debian:${SUITE} -> release ${REL_TAG} (publish=${PUBLISH})"
 
       - name: Free up disk & add swap
         run: |
@@ -97,7 +113,7 @@ jobs:
           fi
           free -h
 
-      - name: Build MediaPipe in Debian Bookworm (aarch64)
+      - name: Build MediaPipe in Debian ${{ steps.params.outputs.debian_suite }} (aarch64)
         run: |
           set -euxo pipefail
           sudo mkdir -p /mnt/mpbuild
@@ -108,7 +124,7 @@ jobs:
             -e MEDIAPIPE_VERSION="${{ steps.params.outputs.mediapipe_version }}" \
             -e WORKSPACE_DIR=/workspace \
             -e BUILD_ROOT=/mnt/mpbuild \
-            debian:bookworm \
+            "debian:${{ steps.params.outputs.debian_suite }}" \
             bash scripts/build_mediapipe.sh
 
       - name: Package tarball & Debian installer
@@ -130,30 +146,40 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.params.outputs.release_tag }}
-          name: MediaPipe ${{ steps.params.outputs.mediapipe_version }} for Raspberry Pi (aarch64)
+          name: MediaPipe ${{ steps.params.outputs.mediapipe_version }} for Raspberry Pi 5 (aarch64)
           body: |
             Prebuilt **MediaPipe ${{ steps.params.outputs.mediapipe_version }}** C++ artifacts for
-            64-bit Raspberry Pi OS (Bookworm, aarch64). Built natively on arm64 inside a
-            Debian Bookworm container (glibc 2.36), CPU/TFLite inference, GPU disabled.
+            64-bit Raspberry Pi OS (aarch64), CPU/TFLite inference, GPU disabled. Built
+            natively on arm64 inside a `debian:${{ steps.params.outputs.debian_suite }}`
+            container, so it links that release's OpenCV **by soname** — install it on a
+            matching Raspberry Pi OS or it will not load.
 
-            Verified target: **Raspberry Pi Zero 2 W** (and newer 64-bit Pi boards).
+            Built for the **Raspberry Pi 5** (BCM2712, Cortex-A76) with
+            `-mcpu=cortex-a76 -O3`. These binaries will **not** run on a Pi 4, Pi 3
+            or Zero 2 W — those cores fault with `SIGILL`.
 
             ### Artifacts
             | File | Description |
             | ---- | ----------- |
-            | `libmediapipe_*_arm64.deb` | Debian installer for Raspberry Pi Zero 2 W. Installs to `/opt/mediapipe/<ver>`, registers `libmediapipe_tasks.so` and the example CPU binaries. |
-            | `mediapipe-*-aarch64-rpi.tar.gz` | Same payload as a plain tarball: `lib/`, `bin/`, `include/`, `share/`. |
+            | `libmediapipe_*_arm64.deb` | Debian installer for Raspberry Pi 5. Installs to `/opt/mediapipe/<ver>`, registers `libmediapipe_tasks.so`, the example CPU binaries and `mediapipe.pc`. |
+            | `mediapipe-*-aarch64-rpi5.tar.gz` | Same payload as a plain tarball: `lib/`, `bin/`, `include/`, `share/`. |
 
-            ### Install on a Raspberry Pi Zero 2 W (64-bit Raspberry Pi OS)
+            ### Install on a Raspberry Pi 5 (64-bit Raspberry Pi OS)
             ```bash
             sudo apt-get update && sudo apt-get install -y libopencv-dev ffmpeg
             sudo dpkg -i libmediapipe_*_arm64.deb
             ```
 
             Contents: `libmediapipe_tasks.so` (Tasks Vision C++ API), MediaPipe headers,
-            TFLite models, graph configs, and CPU example binaries
+            TFLite models, graph configs, the `face_landmarker.task` Tasks bundle,
+            a `mediapipe.pc` for pkg-config, and CPU example binaries
             (`object_detection_cpu`, `face_detection_cpu`, `hand_tracking_cpu`,
             `pose_tracking_cpu`).
+
+            Build against it with `pkg-config --cflags --libs mediapipe` (plus
+            `-std=c++20`). Every release is gated on a self-check that compiles,
+            links **and runs** a Face Landmarker program against only the packaged
+            headers, library and model bundle.
           files: |
             dist/artifacts/*.deb
             dist/artifacts/*.tar.gz

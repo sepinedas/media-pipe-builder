@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 #
-# Builds MediaPipe C++ artifacts for aarch64 (64-bit Raspberry Pi OS).
+# Builds MediaPipe C++ artifacts for the Raspberry Pi 5 (aarch64).
 #
-# Runs inside a debian:bookworm arm64 container so the produced binaries and
-# shared libraries link against glibc 2.36 -- matching 64-bit Raspberry Pi OS
-# (Bookworm), which keeps them runnable on a Raspberry Pi Zero 2 W and newer.
+# Runs inside a Debian arm64 container whose release MUST match the target
+# Pi's OS -- Raspberry Pi OS for the Pi 5 is Debian 13 (trixie). Two things are
+# pinned by that choice and cannot be papered over afterwards:
+#   * glibc, so the binaries load at all, and
+#   * OpenCV, which the shared library links *by soname*. Trixie has OpenCV
+#     4.10 (libopencv_core.so.410); bookworm has 4.6 (.so.406). A library built
+#     on the wrong one cannot be loaded on the target, and installing both
+#     OpenCVs is not a workaround: cv::Mat crosses the library boundary (see
+#     formats::MatView), so two OpenCV ABIs in one process is undefined
+#     behaviour.
+# Code generation additionally targets the Pi 5's Cortex-A76 (see TARGET_MCPU
+# below), so the artifacts are NOT portable to older Pi boards either.
 #
 # Inputs (environment):
 #   MEDIAPIPE_VERSION  git tag to build, e.g. "v0.10.35"   (required)
@@ -100,11 +109,23 @@ cd "${SRC}"
 # uses `consteval` and class-type non-type template parameters). We deliberately
 # do NOT pass -std here so MediaPipe's own C++20 standard is honoured; forcing
 # c++17 breaks the api3 calculators.
+#
+# -mcpu=cortex-a76 targets the Raspberry Pi 5's BCM2712. It raises the assumed
+# baseline from generic ARMv8-A to the A76's ARMv8.2-A -- dot product, FP16 and
+# LSE atomics -- which is exactly what the quantised TFLite kernels underneath
+# the Tasks API want. It is applied with --copt (target configuration) and not
+# --host_copt, so Bazel's own build tools stay portable on the runner.
+#
+# This makes the artifacts Pi 5 only: they will SIGILL on a Pi 4, Pi 3 or
+# Zero 2 W (Cortex-A72/A53). That is deliberate -- see the README.
+TARGET_MCPU="${TARGET_MCPU:-cortex-a76}"
 COMMON_FLAGS=(
     -c opt
     --define MEDIAPIPE_DISABLE_GPU=1
     --repo_env=CC=clang
     --repo_env=CXX=clang++
+    --copt=-mcpu="${TARGET_MCPU}"
+    --copt=-O3
     --linkopt=-s
     --jobs=HOST_CPUS
     --local_ram_resources=HOST_RAM*0.6
@@ -134,6 +155,37 @@ mkdir -p "${PREFIX}/lib" "${PREFIX}/bin" "${PREFIX}/include" \
 # --- Shared library -------------------------------------------------------
 cp -L "bazel-bin/libmp/libmediapipe_tasks.so" "${PREFIX}/lib/libmediapipe_tasks.so"
 patchelf --set-soname libmediapipe_tasks.so "${PREFIX}/lib/libmediapipe_tasks.so" || true
+
+# --- Runtime package dependencies -----------------------------------------
+# libmediapipe_tasks.so links OpenCV (and friends) *dynamically* -- see
+# overlay/opencv_linux.BUILD -- so a .deb that only declares libc6/libstdc++6
+# installs cleanly and then fails to load the library at runtime. Resolve the
+# real dependencies here, inside the build container, where dpkg can map
+# each DT_NEEDED SONAME back to the package that ships it. Doing this on the
+# host runner would resolve against the runner's distro instead.
+# The OpenCV packages this resolves to are release-specific -- bookworm's
+# libopencv-core406 versus trixie's libopencv-core410 -- which is exactly the
+# point: declaring them makes apt refuse the package on the wrong Debian
+# release instead of letting it install and then fail to load.
+echo "==> Resolving runtime package dependencies"
+{
+    readelf -d "${PREFIX}/lib/libmediapipe_tasks.so" |
+        sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' |
+        while IFS= read -r so; do
+            pkg="$(dpkg -S "${so}" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+            # libc6 is re-emitted below with a minimum-version constraint.
+            if [ -n "${pkg}" ] && [ "${pkg}" != "libc6" ]; then echo "${pkg}"; fi
+        done | sort -u
+    # Pin glibc to whatever this container has rather than a hardcoded number,
+    # so the constraint tracks the suite the package was actually built on.
+    LIBC_VERSION="$(dpkg-query -W -f='${Version}' libc6 2>/dev/null | cut -d- -f1 || true)"
+    if [ -n "${LIBC_VERSION}" ]; then
+        echo "libc6 (>= ${LIBC_VERSION})"
+    else
+        echo "libc6"
+    fi
+} | paste -sd', ' - > "${WORKSPACE_DIR}/dist/depends.txt"
+echo "   depends: $(cat "${WORKSPACE_DIR}/dist/depends.txt")"
 
 # --- Example binaries -----------------------------------------------------
 # NOTE: we intentionally do NOT copy the Bazel *.runfiles trees. They contain
@@ -181,6 +233,30 @@ if [ -d "${BAZEL_OUTPUT_BASE}/external" ]; then
     done
 fi
 
+# --- Tasks model bundles --------------------------------------------------
+# The Tasks Vision C++ API (FaceLandmarker and friends) is driven by *.task
+# bundles. Unlike the graph-era .tflite files collected above these are NOT in
+# the MediaPipe source tree -- Google publishes them separately -- so a package
+# without them ships an API with nothing to run. Fetch them into models/ so a
+# downstream app has a model to point at out of the box.
+echo "==> Downloading Tasks model bundles"
+MODEL_BASE="https://storage.googleapis.com/mediapipe-models"
+download_model() {
+    local url="$1" name="$2" dest="${PREFIX}/share/mediapipe/models/$2"
+    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${dest}" "${url}"; then
+        echo "!! failed to download ${name} from ${url}" >&2
+        return 1
+    fi
+    echo "   + ${name} ($(du -h "${dest}" | cut -f1))"
+}
+# face_landmarker.task carries the face detector, the 478-point mesh *and* the
+# blendshape head. The blendshape head is what FaceLandmarkerOptions'
+# output_face_blendshapes needs: with a bundle that lacks it, Create() fails
+# outright when blendshapes are requested.
+download_model \
+    "${MODEL_BASE}/face_landmarker/face_landmarker/float16/1/face_landmarker.task" \
+    "face_landmarker.task"
+
 # --- Headers: MediaPipe sources + generated protobuf headers --------------
 echo "==> Exporting headers"
 INC="${PREFIX}/include"
@@ -212,7 +288,7 @@ done
 # These live in Bazel's external tree (some checked in, some generated into
 # bazel-bin), NOT under mediapipe/. Export them at the *exact* versions the
 # shared library was built against -- this MediaPipe pins protobuf 5.28 and a
-# 2023 Abseil, far newer than Debian Bookworm's, so downstream code cannot fall
+# 2023 Abseil, far newer than Debian's own, so downstream code cannot fall
 # back to system copies without API/ABI drift against the symbols baked into
 # libmediapipe_tasks.so. Bundling them makes include/ self-contained.
 echo "==> Exporting third-party dependency headers"
@@ -344,61 +420,168 @@ EOF
     rm -f "${GLOG_MACROS}"
 fi
 
-# --- Verify the package compiles AND links a real Tasks program -----------
-# Build a program that actually calls FaceLandmarker::Create/DetectForVideo and
-# link it against ONLY the packaged include/ + lib/ (plus OpenCV). This catches
-# two whole classes of packaging bug before a .deb ships:
-#   * a missing transitive dependency *header* (compile error), and
-#   * a public API symbol that libmediapipe_tasks.so failed to export (link
-#     error: "undefined reference to FaceLandmarker::Create").
-echo "==> Verifying the package compiles and links a Face Landmarker program"
+# --- pkg-config -----------------------------------------------------------
+# Downstream builds should not have to hardcode the versioned install path, nor
+# remember that this library is CPU-only. Ship a .pc that says exactly how the
+# package wants to be consumed; package_deb.sh links it into the system
+# pkg-config search path at install time.
+#
+# Note the C++ standard is deliberately NOT in Cflags: MediaPipe's headers need
+# C++20, but a `-std=` coming from pkg-config would be overridden by whatever
+# the consumer's build system appends, so it belongs in the consumer's own
+# settings (CMake's CXX_STANDARD, -std=c++20 by hand). The README says so.
+echo "==> Writing pkg-config file"
+mkdir -p "${PREFIX}/lib/pkgconfig"
+cat > "${PREFIX}/lib/pkgconfig/mediapipe.pc" <<EOF
+prefix=/opt/mediapipe/${VER}
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+datadir=\${prefix}/share/mediapipe
+modeldir=\${datadir}/models
+
+Name: mediapipe
+Description: MediaPipe ${MEDIAPIPE_VERSION} Tasks Vision C++ API (CPU/TFLite, aarch64)
+URL: https://github.com/google-ai-edge/mediapipe
+Version: ${VER}
+Requires: opencv4
+Cflags: -I\${includedir} -DMEDIAPIPE_DISABLE_GPU=1
+Libs: -L\${libdir} -lmediapipe_tasks
+EOF
+
+# --- Verify the package compiles, links AND runs a real Tasks program -----
+# Build a program that does everything a downstream application does -- wrap a
+# cv::Mat as a mediapipe::Image, create a FaceLandmarker (blendshapes on) from
+# the packaged model bundle and run DetectForVideo -- against ONLY the packaged
+# include/ + lib/ (plus OpenCV), then actually execute it. This catches four
+# classes of packaging bug before a .deb ships:
+#   * a missing transitive dependency *header*                 (compile error)
+#   * a public API symbol the .so failed to export             (link error)
+#   * a missing frame-plumbing symbol such as formats::MatView (link error)
+#   * a missing/incomplete model bundle, e.g. one without the blendshape head
+#     (runtime error from Create()).
+echo "==> Verifying the package compiles, links and runs a Face Landmarker"
 CHECK_SRC="$(mktemp --suffix=.cc)"
 cat > "${CHECK_SRC}" <<'EOF'
+#include <iostream>
 #include <memory>
+#include <utility>
+
 #include <opencv2/core.hpp>
+
 #include "mediapipe/framework/formats/image.h"
 #include "mediapipe/framework/formats/image_frame.h"
 #include "mediapipe/framework/formats/image_frame_opencv.h"
 #include "mediapipe/tasks/cc/vision/core/running_mode.h"
 #include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker.h"
 #include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker_result.h"
+
 using ::mediapipe::tasks::vision::face_landmarker::FaceLandmarker;
 using ::mediapipe::tasks::vision::face_landmarker::FaceLandmarkerOptions;
-// Reference the public entry points so the linker must resolve them from the
-// shared library (never actually run -- this is a link check only).
-int main() {
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "usage: mp_check <face_landmarker.task>\n";
+        return 64;
+    }
     auto options = std::make_unique<FaceLandmarkerOptions>();
+    options->base_options.model_asset_path = argv[1];
     options->running_mode = ::mediapipe::tasks::vision::core::RunningMode::VIDEO;
+    options->num_faces = 1;
+    // Exercise the blendshape head too: a bundle without it fails here.
+    options->output_face_blendshapes = true;
     auto lm = FaceLandmarker::Create(std::move(options));
-    if (!lm.ok()) return 1;
-    mediapipe::Image img;
-    auto r = (*lm)->DetectForVideo(img, 0);
-    return r.ok() ? 0 : 2;
+    if (!lm.ok()) {
+        std::cerr << "Create failed: " << lm.status().ToString() << "\n";
+        return 1;
+    }
+    // The exact frame plumbing a downstream app uses: allocate an ImageFrame,
+    // fill it through a cv::Mat view, hand it over as a mediapipe::Image.
+    auto frame = std::make_shared<mediapipe::ImageFrame>(
+        mediapipe::ImageFormat::SRGB, 256, 256,
+        mediapipe::ImageFrame::kDefaultAlignmentBoundary);
+    cv::Mat view = mediapipe::formats::MatView(frame.get());
+    view.setTo(cv::Scalar(128, 128, 128));
+    mediapipe::Image image(std::move(frame));
+    auto r = (*lm)->DetectForVideo(image, 0);
+    if (!r.ok()) {
+        std::cerr << "DetectForVideo failed: " << r.status().ToString() << "\n";
+        return 2;
+    }
+    // A flat gray image has no face in it; the point is that inference ran.
+    std::cout << "faces detected in a blank frame: " << r->face_landmarks.size()
+              << "\n";
+    return 0;
 }
 EOF
-if clang++ -std=c++20 -DMEDIAPIPE_DISABLE_GPU=1 \
-       -I"${INC}" $(pkg-config --cflags opencv4 2>/dev/null) "${CHECK_SRC}" \
-       -L"${PREFIX}/lib" -lmediapipe_tasks \
-       -Wl,-rpath-link,"${PREFIX}/lib" \
-       $(pkg-config --libs opencv4 2>/dev/null) \
-       -o /tmp/mp_link_check 2>/tmp/mp_check.log; then
-    echo "   self-check passed: headers compile and the API links against the .so"
-else
+
+# Compile the check with a given compiler. MediaPipe itself is built with Clang
+# (its node framework uses C++20 constructs GCC rejects), but downstream users
+# on Raspberry Pi OS reach for g++ first, so both are tried.
+compile_check() {
+    local cxx="$1" out="$2" log="$3"
+    "${cxx}" -std=c++20 -DMEDIAPIPE_DISABLE_GPU=1 \
+        -I"${INC}" $(pkg-config --cflags opencv4 2>/dev/null) "${CHECK_SRC}" \
+        -L"${PREFIX}/lib" -lmediapipe_tasks \
+        -Wl,-rpath-link,"${PREFIX}/lib" \
+        $(pkg-config --libs opencv4 2>/dev/null) \
+        -o "${out}" 2>"${log}"
+}
+
+if ! compile_check clang++ /tmp/mp_check /tmp/mp_check.log; then
     echo "!! self-check FAILED: the package could not compile+link a Face" >&2
     echo "!! Landmarker program. See the errors below (missing header => include/" >&2
     echo "!! is incomplete; undefined reference => the .so did not export the" >&2
-    echo "!! symbol, check overlay/force_export.cc)." >&2
+    echo "!! symbol, check overlay/force_export.cc and overlay/libmp.BUILD)." >&2
     cat /tmp/mp_check.log >&2 || true
     rm -f "${CHECK_SRC}"
     exit 1
 fi
-rm -f "${CHECK_SRC}" /tmp/mp_link_check
+echo "   clang++: headers compile and the API links against the .so"
+
+RUN_RC=0
+LD_LIBRARY_PATH="${PREFIX}/lib" /tmp/mp_check \
+    "${PREFIX}/share/mediapipe/models/face_landmarker.task" || RUN_RC=$?
+if [ "${RUN_RC}" = "132" ]; then
+    # 128+SIGILL. The library is built for -mcpu=${TARGET_MCPU}; if the CI
+    # runner's own CPU is older than that, it cannot execute the code even
+    # though the package is fine for its actual target.
+    echo "   runtime: SKIPPED - this runner's CPU does not implement" >&2
+    echo "            ${TARGET_MCPU}, so the built library cannot run here." >&2
+elif [ "${RUN_RC}" != "0" ]; then
+    echo "!! self-check FAILED (exit ${RUN_RC}): the packaged" >&2
+    echo "!! face_landmarker.task could not be loaded and run. The bundle is" >&2
+    echo "!! missing, truncated, or lacks the blendshape head the check asks" >&2
+    echo "!! for." >&2
+    rm -f "${CHECK_SRC}"
+    exit 1
+else
+    echo "   runtime: the packaged face_landmarker.task loads and inference runs"
+fi
+
+# GCC is only a warning: MediaPipe upstream does not support building its
+# headers with GCC, so a failure here is a known-limitation signal for
+# downstream users rather than a reason to withhold the package.
+if compile_check g++ /tmp/mp_check_gcc /tmp/mp_check_gcc.log; then
+    echo "   g++:     also compiles and links the packaged headers"
+else
+    echo "   g++:     WARNING - the packaged headers do NOT build with g++" >&2
+    echo "            ($(g++ --version | head -n1)). Downstream projects on this" >&2
+    echo "            package must use clang++. First errors:" >&2
+    head -n 25 /tmp/mp_check_gcc.log >&2 || true
+fi
+rm -f "${CHECK_SRC}" /tmp/mp_check /tmp/mp_check_gcc
 
 # --- Docs -----------------------------------------------------------------
 cp LICENSE "${PREFIX}/share/mediapipe/LICENSE" 2>/dev/null || true
 cat > "${PREFIX}/share/mediapipe/BUILD_INFO.txt" <<EOF
 MediaPipe version : ${MEDIAPIPE_VERSION}
-Target            : aarch64 (arm64) / 64-bit Raspberry Pi OS (Bookworm, glibc 2.36)
+Target            : Raspberry Pi 5 (BCM2712, Cortex-A76) / 64-bit Raspberry Pi OS
+Built on          : $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME}" || echo Debian) (aarch64)
+glibc             : $(dpkg-query -W -f='${Version}' libc6 2>/dev/null || echo unknown)
+OpenCV linked     : $(dpkg-query -W -f='${Version}' libopencv-dev 2>/dev/null || echo unknown)
+                    (linked by soname -- the target OS must have the same one)
+Code generation   : -mcpu=${TARGET_MCPU} -O3 (ARMv8.2-A; will SIGILL on Pi 4 and older)
 Built with        : $(bazel version 2>/dev/null | head -n1 || echo bazel)
 GPU               : disabled (MEDIAPIPE_DISABLE_GPU=1, CPU/TFLite inference)
 EOF

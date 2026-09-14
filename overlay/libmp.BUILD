@@ -20,6 +20,14 @@ cc_binary(
     linkshared = True,
     linkstatic = True,
     deps = [
+        # Downstream C++ code has to get its frames *into* MediaPipe. The Tasks
+        # libraries below do not pull image_frame_opencv in themselves, so
+        # without it formats::MatView() -- the zero-copy cv::Mat view used to
+        # fill an ImageFrame -- is simply absent from the .so and every
+        # consumer fails to link.
+        "//mediapipe/framework/formats:image",
+        "//mediapipe/framework/formats:image_frame",
+        "//mediapipe/framework/formats:image_frame_opencv",
         "//mediapipe/tasks/cc/core:mediapipe_builtin_op_resolver",
         "//mediapipe/tasks/cc/vision/face_detector",
         "//mediapipe/tasks/cc/vision/face_landmarker",
