@@ -201,7 +201,10 @@ echo "==> Resolving runtime package dependencies"
     else
         echo "libc6"
     fi
-} | paste -sd', ' - > "${WORKSPACE_DIR}/dist/depends.txt"
+# NB: `paste -sd', '` would be wrong -- -d takes a *list* of delimiters and
+# cycles through them, so four packages come out as "a,b c,d" and dpkg-deb
+# rejects the field. Join on commas only, then space them out for readability.
+} | paste -sd, - | sed 's/,/, /g' > "${WORKSPACE_DIR}/dist/depends.txt"
 echo "   depends: $(cat "${WORKSPACE_DIR}/dist/depends.txt")"
 
 # --- Example binaries -----------------------------------------------------
