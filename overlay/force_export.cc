@@ -15,7 +15,11 @@
 // collected.
 
 #include <memory>
+#include <utility>
 
+#include "mediapipe/framework/formats/image.h"
+#include "mediapipe/framework/formats/image_frame.h"
+#include "mediapipe/framework/formats/image_frame_opencv.h"
 #include "mediapipe/tasks/cc/core/mediapipe_builtin_op_resolver.h"
 #include "mediapipe/tasks/cc/vision/face_landmarker/face_landmarker.h"
 
@@ -37,6 +41,22 @@ __attribute__((used, visibility("default")))
 void olc_mediapipe_force_keep() {
   auto r = std::make_unique<::mediapipe::tasks::core::MediaPipeBuiltinOpResolver>();
   asm volatile("" : : "r"(r.get()) : "memory");
+}
+
+// The frame-plumbing every downstream program needs before it can call a Task:
+// allocate an ImageFrame, get a cv::Mat view of it to copy pixels into, and
+// wrap it as a mediapipe::Image. None of these are referenced by the Tasks
+// entry points above, so without this they are dropped from the .so and
+// consumers fail to link against ImageFrame's constructor/destructor and
+// formats::MatView.
+__attribute__((used, visibility("default")))
+void olc_mediapipe_force_keep_image_io() {
+  auto f = std::make_shared<::mediapipe::ImageFrame>(
+      ::mediapipe::ImageFormat::SRGB, 2, 2,
+      ::mediapipe::ImageFrame::kDefaultAlignmentBoundary);
+  cv::Mat view = ::mediapipe::formats::MatView(f.get());
+  ::mediapipe::Image image(std::move(f));
+  asm volatile("" : : "r"(&view), "r"(&image) : "memory");
 }
 
 }  // extern "C"
