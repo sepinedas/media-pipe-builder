@@ -2,10 +2,18 @@
 #
 # Builds MediaPipe C++ artifacts for the Raspberry Pi 5 (aarch64).
 #
-# Runs inside a debian:bookworm arm64 container so the produced binaries and
-# shared libraries link against glibc 2.36 -- matching 64-bit Raspberry Pi OS
-# (Bookworm). Code generation targets the Pi 5's Cortex-A76 (see TARGET_MCPU
-# below), so the artifacts are NOT portable to older Pi boards.
+# Runs inside a Debian arm64 container whose release MUST match the target
+# Pi's OS -- Raspberry Pi OS for the Pi 5 is Debian 13 (trixie). Two things are
+# pinned by that choice and cannot be papered over afterwards:
+#   * glibc, so the binaries load at all, and
+#   * OpenCV, which the shared library links *by soname*. Trixie has OpenCV
+#     4.10 (libopencv_core.so.410); bookworm has 4.6 (.so.406). A library built
+#     on the wrong one cannot be loaded on the target, and installing both
+#     OpenCVs is not a workaround: cv::Mat crosses the library boundary (see
+#     formats::MatView), so two OpenCV ABIs in one process is undefined
+#     behaviour.
+# Code generation additionally targets the Pi 5's Cortex-A76 (see TARGET_MCPU
+# below), so the artifacts are NOT portable to older Pi boards either.
 #
 # Inputs (environment):
 #   MEDIAPIPE_VERSION  git tag to build, e.g. "v0.10.35"   (required)
@@ -152,17 +160,31 @@ patchelf --set-soname libmediapipe_tasks.so "${PREFIX}/lib/libmediapipe_tasks.so
 # libmediapipe_tasks.so links OpenCV (and friends) *dynamically* -- see
 # overlay/opencv_linux.BUILD -- so a .deb that only declares libc6/libstdc++6
 # installs cleanly and then fails to load the library at runtime. Resolve the
-# real dependencies here, inside the Bookworm container, where dpkg can map
+# real dependencies here, inside the build container, where dpkg can map
 # each DT_NEEDED SONAME back to the package that ships it. Doing this on the
 # host runner would resolve against the runner's distro instead.
+# The OpenCV packages this resolves to are release-specific -- bookworm's
+# libopencv-core406 versus trixie's libopencv-core410 -- which is exactly the
+# point: declaring them makes apt refuse the package on the wrong Debian
+# release instead of letting it install and then fail to load.
 echo "==> Resolving runtime package dependencies"
-readelf -d "${PREFIX}/lib/libmediapipe_tasks.so" |
-    sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' |
-    while IFS= read -r so; do
-        pkg="$(dpkg -S "${so}" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
-        # libc6 is declared separately with a minimum version.
-        if [ -n "${pkg}" ] && [ "${pkg}" != "libc6" ]; then echo "${pkg}"; fi
-    done | sort -u | paste -sd', ' - > "${WORKSPACE_DIR}/dist/depends.txt"
+{
+    readelf -d "${PREFIX}/lib/libmediapipe_tasks.so" |
+        sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' |
+        while IFS= read -r so; do
+            pkg="$(dpkg -S "${so}" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+            # libc6 is re-emitted below with a minimum-version constraint.
+            if [ -n "${pkg}" ] && [ "${pkg}" != "libc6" ]; then echo "${pkg}"; fi
+        done | sort -u
+    # Pin glibc to whatever this container has rather than a hardcoded number,
+    # so the constraint tracks the suite the package was actually built on.
+    LIBC_VERSION="$(dpkg-query -W -f='${Version}' libc6 2>/dev/null | cut -d- -f1 || true)"
+    if [ -n "${LIBC_VERSION}" ]; then
+        echo "libc6 (>= ${LIBC_VERSION})"
+    else
+        echo "libc6"
+    fi
+} | paste -sd', ' - > "${WORKSPACE_DIR}/dist/depends.txt"
 echo "   depends: $(cat "${WORKSPACE_DIR}/dist/depends.txt")"
 
 # --- Example binaries -----------------------------------------------------
@@ -266,7 +288,7 @@ done
 # These live in Bazel's external tree (some checked in, some generated into
 # bazel-bin), NOT under mediapipe/. Export them at the *exact* versions the
 # shared library was built against -- this MediaPipe pins protobuf 5.28 and a
-# 2023 Abseil, far newer than Debian Bookworm's, so downstream code cannot fall
+# 2023 Abseil, far newer than Debian's own, so downstream code cannot fall
 # back to system copies without API/ABI drift against the symbols baked into
 # libmediapipe_tasks.so. Bundling them makes include/ self-contained.
 echo "==> Exporting third-party dependency headers"
@@ -555,7 +577,10 @@ cp LICENSE "${PREFIX}/share/mediapipe/LICENSE" 2>/dev/null || true
 cat > "${PREFIX}/share/mediapipe/BUILD_INFO.txt" <<EOF
 MediaPipe version : ${MEDIAPIPE_VERSION}
 Target            : Raspberry Pi 5 (BCM2712, Cortex-A76) / 64-bit Raspberry Pi OS
-                    (Bookworm, glibc 2.36, aarch64)
+Built on          : $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME}" || echo Debian) (aarch64)
+glibc             : $(dpkg-query -W -f='${Version}' libc6 2>/dev/null || echo unknown)
+OpenCV linked     : $(dpkg-query -W -f='${Version}' libopencv-dev 2>/dev/null || echo unknown)
+                    (linked by soname -- the target OS must have the same one)
 Code generation   : -mcpu=${TARGET_MCPU} -O3 (ARMv8.2-A; will SIGILL on Pi 4 and older)
 Built with        : $(bazel version 2>/dev/null | head -n1 || echo bazel)
 GPU               : disabled (MEDIAPIPE_DISABLE_GPU=1, CPU/TFLite inference)

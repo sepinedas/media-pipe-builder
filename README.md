@@ -36,9 +36,20 @@ The payload itself:
 
 - Runs on GitHub's free native **`ubuntu-24.04-arm`** runners — no QEMU
   emulation, so builds complete in a reasonable time.
-- The actual compilation happens inside a **`debian:bookworm`** arm64 container.
-  64-bit Raspberry Pi OS is Debian Bookworm based (glibc 2.36), so binaries
-  produced here run on a Pi 5 without glibc mismatches.
+- The actual compilation happens inside a **Debian arm64 container whose
+  release matches the target Pi's OS** — `debian:trixie` by default, since
+  Raspberry Pi OS for the Pi 5 is Debian 13. Override it with the
+  `debian_suite` workflow input.
+
+  > **This has to match, and it is not a detail.** The shared library links
+  > OpenCV *by soname*: trixie has OpenCV 4.10 (`libopencv_core.so.410`),
+  > bookworm has 4.6 (`.so.406`). A library built on the wrong release cannot
+  > be loaded on the target at all. Installing the other OpenCV alongside is
+  > **not** a workaround — `cv::Mat` crosses the library boundary through
+  > `formats::MatView`, so two OpenCV ABIs in one process is undefined
+  > behaviour that bites at runtime rather than at load. The generated
+  > `Depends` names the exact OpenCV packages, so `apt` refuses the package on
+  > the wrong release instead of letting you find out the hard way.
 - Code generation targets the Pi 5's **Cortex-A76** (`-mcpu=cortex-a76 -O3`),
   raising the assumed baseline from generic ARMv8-A to ARMv8.2-A — dot product,
   FP16, LSE atomics — which is what the quantised TFLite kernels under the
@@ -78,7 +89,8 @@ version is built and released automatically.
 
 ## Using the release on a Raspberry Pi 5
 
-Install the `.deb` on 64-bit Raspberry Pi OS (Bookworm, aarch64):
+Install the `.deb` on 64-bit Raspberry Pi OS (aarch64), on the same Debian
+release the package was built for:
 
 ```bash
 sudo apt-get update
@@ -149,7 +161,7 @@ installed, so applications do not have to know the version number.
 > flatbuffers, glog). Those dependency **headers are bundled** into `include/`
 > at the exact versions the library was built against — do **not** substitute
 > your distro's copies (this build pins protobuf 5.28 and a 2023 Abseil, far
-> newer than Debian Bookworm's, so the ABIs would not match the symbols baked
+> newer than Debian's own, so the ABIs would not match the symbols baked
 > into `libmediapipe_tasks.so`). Those dependencies' implementations are
 > statically linked into the shared library, so you only link `-lmediapipe_tasks`
 > (plus OpenCV). For non-trivial applications, building against MediaPipe with

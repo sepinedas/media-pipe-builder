@@ -35,16 +35,18 @@ cp -a "${STAGING}/${PREFIX}/." "${PKG_ROOT}/${PREFIX}/"
 INSTALLED_KB="$(du -sk "${PKG_ROOT}/opt" | awk '{print $1}')"
 
 # Runtime dependencies resolved from the shared library's DT_NEEDED entries
-# inside the Bookworm build container (see build_mediapipe.sh). Without these
+# inside the build container (see build_mediapipe.sh). Without these
 # the package installs but libmediapipe_tasks.so fails to load, because it
 # links OpenCV dynamically.
-RESOLVED_DEPENDS="$(tr -d '\n' < "${DIST}/depends.txt" 2>/dev/null || true)"
-if [ -n "${RESOLVED_DEPENDS}" ]; then
-    DEPENDS="libc6 (>= 2.36), ${RESOLVED_DEPENDS}"
-else
+# The line already includes a version-pinned libc6; it is written whole by the
+# build container rather than assembled here, because only the container knows
+# which Debian release -- and therefore which OpenCV soname packages -- the
+# library was linked against.
+DEPENDS="$(tr -d '\n' < "${DIST}/depends.txt" 2>/dev/null || true)"
+if [ -z "${DEPENDS}" ]; then
     echo "WARNING: dist/depends.txt is missing or empty; falling back to a" >&2
     echo "         minimal Depends line, which under-declares OpenCV." >&2
-    DEPENDS="libc6 (>= 2.36), libstdc++6, libgcc-s1"
+    DEPENDS="libc6, libstdc++6, libgcc-s1"
 fi
 
 mkdir -p "${PKG_ROOT}/DEBIAN"
@@ -60,7 +62,7 @@ Depends: ${DEPENDS}
 Recommends: libopencv-dev, ffmpeg
 Homepage: https://github.com/google-ai-edge/mediapipe
 Description: MediaPipe ${VER} C++ libraries and CPU tools for Raspberry Pi 5 (aarch64)
- Prebuilt MediaPipe ${VER} for 64-bit Raspberry Pi OS (Bookworm / aarch64).
+ Prebuilt MediaPipe ${VER} for 64-bit Raspberry Pi OS (aarch64).
  Includes the Tasks Vision C++ shared library (libmediapipe_tasks.so),
  MediaPipe headers, graph configurations, TFLite models and CPU example
  binaries (object detection, face detection, hand and pose tracking).
